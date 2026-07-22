@@ -42,6 +42,8 @@ class NoIPUpdater:
         # Setup browser options
         logger.debug("Initializing browser...")
         options = webdriver.ChromeOptions()
+        # 指定 Chromium 二进制路径（GitHub Actions Ubuntu 环境）
+        options.binary_location = "/usr/bin/chromium-browser"
         # Avoids shared memory issues
         options.add_argument("disable-features=VizDisplayCompositor")
         options.add_argument("headless")  # Run in headless mode
