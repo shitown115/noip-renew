@@ -43,7 +43,7 @@ class NoIPUpdater:
     def _init_browser(self, page_load_timeout: int = 90):
         logger.debug("Initializing browser...")
         options = webdriver.ChromeOptions()
-        options.binary_location = "/usr/bin/chromium-browser"  # GitHub Actions 环境
+        options.binary_location = "/usr/bin/chromium-browser"
         options.add_argument("disable-features=VizDisplayCompositor")
         options.add_argument("headless")
         options.add_argument("no-sandbox")
@@ -92,39 +92,61 @@ class NoIPUpdater:
         if logger.level == logging.DEBUG:
             self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/otp_screen.png")
         otp = pyotp.TOTP(self.totp_secret).now()
-        logger.info(f"Generated OTP: {otp}")  # 仅调试
+        logger.info(f"Generated OTP: {otp}")
 
-        # 等待 TOTP 输入框出现
         wait = WebDriverWait(self.browser, 30)
+
         try:
-            # 新的 No-IP TOTP 页面使用 input 数组，每个 digit 一个 input
-            # 定位所有 type="tel" 或 input 在 totp-input 容器内
+            # 等待 OTP 输入框出现
             otp_inputs = wait.until(EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, "#totp-input input[type='tel'], #totp-input input")
             ))
-            if len(otp_inputs) != OTP_LENGTH:
-                logger.warning(f"Found {len(otp_inputs)} OTP inputs, expected {OTP_LENGTH}, trying fallback...")
-                # 尝试 XPath 逐个定位
+
+            if len(otp_inputs) >= OTP_LENGTH:
+                for i, inp in enumerate(otp_inputs[:OTP_LENGTH]):
+                    inp.send_keys(otp[i])
+            else:
+                # 如果一次没找到全部输入框，尝试逐个定位
                 for pos in range(OTP_LENGTH):
                     otp_elem = self.browser.find_element(
                         By.XPATH, f'//*[@id="totp-input"]/input[{pos+1}]'
                     )
                     otp_elem.send_keys(otp[pos])
-                # 点击验证按钮
-                verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Verify']")))
-                verify_btn.click()
-                return
 
-            # 如果成功获取全部输入框，依次填入
-            for i, inp in enumerate(otp_inputs):
-                inp.send_keys(otp[i])
-            # 点击 Verify 按钮
-            verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Verify']")))
-            verify_btn.click()
+            # 可选：勾选 "Trust this device for 30 days"（但 No-IP 可能默认不勾选）
+            try:
+                trust_checkbox = self.browser.find_element(By.XPATH, "//input[@type='checkbox']")
+                if not trust_checkbox.is_selected():
+                    trust_checkbox.click()
+                    logger.info("Checked 'Trust this device for 30 days'")
+            except NoSuchElementException:
+                logger.info("No trust checkbox found, skipping.")
+
+            # 点击 Verify 按钮 - 多种定位方式
+            verify_btn = None
+            try:
+                verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Verify']")))
+            except TimeoutException:
+                try:
+                    verify_btn = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']")))
+                except TimeoutException:
+                    verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Verify')]")))
+
+            if verify_btn:
+                # 滚动到按钮并点击
+                self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", verify_btn)
+                time.sleep(1)
+                self.browser.execute_script("arguments[0].click();", verify_btn)
+                logger.info("Verify button clicked")
+
+            # 等待登录成功，URL 变化或页面出现 "My No-IP"
+            wait.until(EC.url_contains("my.noip.com"))
+            logger.info("Login successful after OTP verification")
+
         except Exception as e:
-            logger.error(f"Error filling OTP: {e}")
+            logger.error(f"Error in OTP flow: {e}")
             self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/otp_error.png")
-            raise Exception(f"Failed while filling OTP: {e}")
+            raise Exception(f"Failed during OTP verification: {e}")
 
     def login(self):
         logger.info(f"Opening {LOGIN_URL} ...")
@@ -137,19 +159,16 @@ class NoIPUpdater:
         self._solve_captcha()
 
         # 检查是否需要 TOTP
-        time.sleep(3)  # 等待跳转
+        time.sleep(3)
         if logger.level == logging.DEBUG:
             self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/after_login.png")
 
         try:
-            # 尝试查找 TOTP 输入框容器
             self.browser.find_element(By.ID, "totp-input")
             logger.info("TOTP input detected, filling OTP...")
             self._fill_otp()
         except NoSuchElementException:
-            logger.info("No TOTP input, maybe already logged in or using email verification.")
-            # 如果页面不是 TOTP，可能是因为邮箱验证，但我们已经启用2FA，应该不会发生
-            # 保险起见，可在此处理邮箱验证（但暂不实现）
+            logger.info("No TOTP input, maybe already logged in.")
 
         if logger.level == logging.DEBUG:
             time.sleep(1)
