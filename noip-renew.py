@@ -10,6 +10,8 @@ from selenium.common.exceptions import (NoSuchElementException,
                                         ElementNotInteractableException,
                                         TimeoutException)
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from constants import HOST_URL, LOGIN_URL, SCREENSHOTS_PATH, USER_AGENT, OTP_LENGTH
 
@@ -39,17 +41,14 @@ class NoIPUpdater:
         self.browser = self._init_browser()
 
     def _init_browser(self, page_load_timeout: int = 90):
-        # Setup browser options
         logger.debug("Initializing browser...")
         options = webdriver.ChromeOptions()
-        # 指定 Chromium 二进制路径（GitHub Actions Ubuntu 环境）
-        options.binary_location = "/usr/bin/chromium-browser"
-        # Avoids shared memory issues
+        options.binary_location = "/usr/bin/chromium-browser"  # GitHub Actions 环境
         options.add_argument("disable-features=VizDisplayCompositor")
-        options.add_argument("headless")  # Run in headless mode
-        options.add_argument("no-sandbox")  # Bypass OS security model
-        options.add_argument("window-size=1200x800")  # Set window size
-        options.add_argument(f"user-agent={USER_AGENT}")  # Set user agent
+        options.add_argument("headless")
+        options.add_argument("no-sandbox")
+        options.add_argument("window-size=1200x800")
+        options.add_argument(f"user-agent={USER_AGENT}")
         if self.https_proxy:
             options.add_argument("proxy-server=" + self.https_proxy)
         browser = webdriver.Chrome(options=options)
@@ -65,8 +64,7 @@ class NoIPUpdater:
             ele_usr.send_keys(self.username)
             ele_pwd.send_keys(self.password)
         except (NoSuchElementException, ElementNotInteractableException) as e:
-            logger.error(
-                f"Error filling credentials: {e}, element: {ele_usr or ele_pwd}")
+            logger.error(f"Error filling credentials: {e}")
             raise Exception(f"Failed while inserting credentials: {e}")
 
     def _solve_captcha(self):
@@ -74,16 +72,12 @@ class NoIPUpdater:
         try:
             if logger.level == logging.DEBUG:
                 self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/captcha_screen.png")
-            # 尝试通过 ID 找到登录按钮
             login_button = self.browser.find_element(By.ID, "clogs-captcha-button")
-            # 滚动到按钮位置，避免被遮挡
             self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", login_button)
             time.sleep(1)
-            # 使用 JavaScript 强制点击
             self.browser.execute_script("arguments[0].click();", login_button)
         except (NoSuchElementException, ElementNotInteractableException) as e:
             logger.error(f"Error clicking captcha button: {e}")
-            # 备用方案：尝试通过 type="submit" 寻找按钮
             try:
                 login_button = self.browser.find_element(By.CSS_SELECTOR, "button[type='submit']")
                 self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", login_button)
@@ -98,22 +92,39 @@ class NoIPUpdater:
         if logger.level == logging.DEBUG:
             self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/otp_screen.png")
         otp = pyotp.TOTP(self.totp_secret).now()
+        logger.info(f"Generated OTP: {otp}")  # 仅调试
+
+        # 等待 TOTP 输入框出现
+        wait = WebDriverWait(self.browser, 30)
         try:
-            for pos in range(OTP_LENGTH):
-                otp_elem = self.browser.find_element(
-                    By.XPATH,
-                    '//*[@id="totp-input"]/input' + str([pos + 1]),
-                )
-                otp_elem.send_keys(otp[pos])
-        except (NoSuchElementException, ElementNotInteractableException) as e:
-            logger.error(f"Error filling OTP code: {e}, position: {pos}")
+            # 新的 No-IP TOTP 页面使用 input 数组，每个 digit 一个 input
+            # 定位所有 type="tel" 或 input 在 totp-input 容器内
+            otp_inputs = wait.until(EC.presence_of_all_elements_located(
+                (By.CSS_SELECTOR, "#totp-input input[type='tel'], #totp-input input")
+            ))
+            if len(otp_inputs) != OTP_LENGTH:
+                logger.warning(f"Found {len(otp_inputs)} OTP inputs, expected {OTP_LENGTH}, trying fallback...")
+                # 尝试 XPath 逐个定位
+                for pos in range(OTP_LENGTH):
+                    otp_elem = self.browser.find_element(
+                        By.XPATH, f'//*[@id="totp-input"]/input[{pos+1}]'
+                    )
+                    otp_elem.send_keys(otp[pos])
+                # 点击验证按钮
+                verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Verify']")))
+                verify_btn.click()
+                return
+
+            # 如果成功获取全部输入框，依次填入
+            for i, inp in enumerate(otp_inputs):
+                inp.send_keys(otp[i])
+            # 点击 Verify 按钮
+            verify_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@value='Verify']")))
+            verify_btn.click()
+        except Exception as e:
+            logger.error(f"Error filling OTP: {e}")
+            self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/otp_error.png")
             raise Exception(f"Failed while filling OTP: {e}")
-        try:
-            self.browser.find_element(
-                By.XPATH, "//input[@value='Verify']").click()
-        except (NoSuchElementException, ElementNotInteractableException) as e:
-            logger.error(f"Error clicking verify button: {e}")
-            raise Exception(f"Failed while verifying OTP: {e}")
 
     def login(self):
         logger.info(f"Opening {LOGIN_URL} ...")
@@ -125,13 +136,20 @@ class NoIPUpdater:
         self._fill_credentials()
         self._solve_captcha()
 
-        # 检查是否存在 OTP 输入框，如果没有则跳过
+        # 检查是否需要 TOTP
+        time.sleep(3)  # 等待跳转
+        if logger.level == logging.DEBUG:
+            self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/after_login.png")
+
         try:
-            otp_input = self.browser.find_element(By.XPATH, "//*[@id='totp-input']")
-            logger.info("OTP input found, filling OTP...")
+            # 尝试查找 TOTP 输入框容器
+            self.browser.find_element(By.ID, "totp-input")
+            logger.info("TOTP input detected, filling OTP...")
             self._fill_otp()
         except NoSuchElementException:
-            logger.info("No OTP input found, skipping OTP (2FA not enabled)")
+            logger.info("No TOTP input, maybe already logged in or using email verification.")
+            # 如果页面不是 TOTP，可能是因为邮箱验证，但我们已经启用2FA，应该不会发生
+            # 保险起见，可在此处理邮箱验证（但暂不实现）
 
         if logger.level == logging.DEBUG:
             time.sleep(1)
@@ -155,39 +173,30 @@ class NoIPUpdater:
             expiration_days = self.get_host_expiration_days(host)
             logger.info(f"expiration days: {expiration_days}")
             if expiration_days < 7:
-                logger.info(
-                    f"Host {host_name} is about to expire, confirming host..")
+                logger.info(f"Host {host_name} is about to expire, confirming host..")
                 host_button = self.get_host_button(host)
                 self.update_host(host_button, host_name)
                 logger.info(f"Host confirmed: {host_name}")
-                self.browser.save_screenshot(
-                    f"{SCREENSHOTS_PATH}/{host_name}-results.png"
-                )
+                self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/{host_name}-results.png")
             else:
-                logger.info(
-                    f"Host {host_name} is yet not due, remaining days to expire: {expiration_days}"
-                )
+                logger.info(f"Host {host_name} is yet not due, remaining days to expire: {expiration_days}")
 
     def update_host(self, host_button, host_name):
         logger.info(f"Updating {host_name}")
         host_button.click()
         time.sleep(1)
         try:
-            upgrade_element = self.browser.find_element(
-                By.XPATH, "//h2[@class='big']")
+            upgrade_element = self.browser.find_element(By.XPATH, "//h2[@class='big']")
             intervention = upgrade_element.text == "Upgrade Now"
         except NoSuchElementException:
             intervention = False
         except Exception as e:
             logger.error(f"An unexpected error occurred: {e}")
-            intervention = False  # Assume no intervention needed on unexpected errors
+            intervention = False
 
         if intervention:
-            raise Exception(
-                f"Manual intervention required for host {host_name}. Upgrade text detected."
-            )
-        self.browser.save_screenshot(
-            f"{SCREENSHOTS_PATH}/{host_name}_success.png")
+            raise Exception(f"Manual intervention required for host {host_name}. Upgrade text detected.")
+        self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/{host_name}_success.png")
 
     def get_host_expiration_days(self, host):
         try:
@@ -196,14 +205,11 @@ class NoIPUpdater:
                 ".//a[contains(@class, 'no-link-style') and contains(@class, 'popover-info')]",
             ).get_attribute("data-original-title")
         except NoSuchElementException:
-            logger.warning(
-                "Could not find expiration days element. Assuming host is expired or element has changed.")
+            logger.warning("Could not find expiration days element. Assuming host is expired or element has changed.")
             return 0
         regex_match = re.search(r"\d+", host_remaining_days)
         if regex_match is None:
-            raise Exception(
-                "Expiration days label does not match the expected pattern"
-            )
+            raise Exception("Expiration days label does not match the expected pattern")
         expiration_days = int(regex_match.group(0))
         return expiration_days
 
@@ -216,8 +222,7 @@ class NoIPUpdater:
         )
 
     def get_hosts(self) -> list:
-        host_tds = self.browser.find_elements(
-            By.XPATH, '//td[@data-title="Host"]')
+        host_tds = self.browser.find_elements(By.XPATH, '//td[@data-title="Host"]')
         if len(host_tds) == 0:
             with open(f"{SCREENSHOTS_PATH}/page.html", "w") as f:
                 f.write(self.browser.page_source)
@@ -247,11 +252,9 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--password", required=True)
     parser.add_argument("-s", "--totp-secret", required=True)
     parser.add_argument("-t", "--https-proxy", required=False)
-    parser.add_argument("-d", "--debug", type=bool,
-                        default=False, required=False)
+    parser.add_argument("-d", "--debug", type=bool, default=False, required=False)
     args = vars(parser.parse_args())
 
-    # Set debug level
     logger.setLevel(logging.DEBUG if args["debug"] else logging.INFO)
 
     NoIPUpdater(
