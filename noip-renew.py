@@ -66,26 +66,30 @@ class NoIPUpdater:
             logger.error(
                 f"Error filling credentials: {e}, element: {ele_usr or ele_pwd}")
             raise Exception(f"Failed while inserting credentials: {e}")
-
-        def _solve_captcha(self):
+     def _solve_captcha(self):
         logger.info("Solving captcha...")
         try:
             if logger.level == logging.DEBUG:
                 self.browser.save_screenshot(f"{SCREENSHOTS_PATH}/captcha_screen.png")
-            
-            
+            # 尝试通过 ID 找到登录按钮
             login_button = self.browser.find_element(By.ID, "clogs-captcha-button")
-            
+            # 滚动到按钮位置，避免被遮挡
+            self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", login_button)
+            time.sleep(1)
+            # 使用 JavaScript 强制点击
             self.browser.execute_script("arguments[0].click();", login_button)
         except (NoSuchElementException, ElementNotInteractableException) as e:
             logger.error(f"Error clicking captcha button: {e}")
-            
+            # 备用方案：尝试通过 type="submit" 寻找按钮
             try:
                 login_button = self.browser.find_element(By.CSS_SELECTOR, "button[type='submit']")
+                self.browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", login_button)
+                time.sleep(1)
                 self.browser.execute_script("arguments[0].click();", login_button)
             except Exception as e2:
                 logger.error(f"Fallback click also failed: {e2}")
                 raise Exception(f"Failed while trying to solve captcha: {e}")
+        
     def _fill_otp(self):
         logger.info("Filling OTP...")
         if logger.level == logging.DEBUG:
