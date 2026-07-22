@@ -124,7 +124,14 @@ class NoIPUpdater:
         logger.info("Logging in...")
         self._fill_credentials()
         self._solve_captcha()
-        self._fill_otp()
+
+        # 检查是否存在 OTP 输入框，如果没有则跳过
+        try:
+            otp_input = self.browser.find_element(By.XPATH, "//*[@id='totp-input']")
+            logger.info("OTP input found, filling OTP...")
+            self._fill_otp()
+        except NoSuchElementException:
+            logger.info("No OTP input found, skipping OTP (2FA not enabled)")
 
         if logger.level == logging.DEBUG:
             time.sleep(1)
