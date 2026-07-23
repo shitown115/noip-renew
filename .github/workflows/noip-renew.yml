@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build custom No-IP renew image
+        run: |
+          docker build -t noip-renew-custom .
+
       - name: Run No-IP Renewal
         env:
           NOIP_USERNAME: ${{ secrets.NOIP_USERNAME }}
@@ -17,7 +24,7 @@ jobs:
           NOIP_TOTP_SECRET: ${{ secrets.NOIP_TOTP_SECRET }}
         run: |
           mkdir -p ${{ github.workspace }}/screenshots
-          docker run --rm -v ${{ github.workspace }}/screenshots:/app/screenshots kirbah/noip-renew:latest \
+          docker run --rm -v ${{ github.workspace }}/screenshots:/app/screenshots noip-renew-custom \
             -u "$NOIP_USERNAME" -p "$NOIP_PASSWORD" -s "$NOIP_TOTP_SECRET" -d DEBUG
 
       - name: Upload Screenshots
